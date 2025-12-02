@@ -1,44 +1,52 @@
 import streamlit as st
 import pandas as pd
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 import time
 from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
+import os
+import shutil
 
 # --- 1. CONFIGURACIÓN ---
 st.set_page_config(page_title="ERP Nube F&B", layout="wide", page_icon="☁️")
 
 # Nombre exacto de tu Google Sheet y del archivo de credenciales
 NOMBRE_HOJA_DRIVE = "DB_ERP_MASTER"
-ARCHIVO_CREDENCIALES = "credenciales"
+ARCHIVO_CREDENCIALES = "credenciales.json"
 
-# --- 2. CONEXIÓN A GOOGLE SHEETS (EL MOTOR NUEVO) ---
-
-# --- BUSCA ESTA PARTE EN TU CÓDIGO Y REEMPLÁZALA POR ESTO ---
+# --- 2. CONEXIÓN A GOOGLE SHEETS (MOTOR MODERNO) ---
 
 @st.cache_resource
 def conectar_google_sheet():
-    """Conecta con Google Drive (Compatible con Local y Nube)."""
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    """Conecta con Google Drive usando google-auth (Más estable)."""
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
     
     try:
         # INTENTO 1: Buscar en Secretos de Nube (Streamlit Cloud)
         if "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
         
         # INTENTO 2: Buscar archivo local (Tu laptop)
         else:
-            creds = ServiceAccountCredentials.from_json_keyfile_name(ARCHIVO_CREDENCIALES, scope)
+            if not os.path.exists(ARCHIVO_CREDENCIALES):
+                st.error(f"❌ No encuentro el archivo '{ARCHIVO_CREDENCIALES}'. Asegúrate de que esté en la misma carpeta.")
+                st.stop()
+            creds = Credentials.from_service_account_file(ARCHIVO_CREDENCIALES, scopes=scope)
             
         client = gspread.authorize(creds)
+        
+        # Intentamos abrir la hoja
         sheet = client.open(NOMBRE_HOJA_DRIVE)
         return sheet
         
-    except FileNotFoundError:
-        st.error(f"❌ Error Local: No encuentro '{ARCHIVO_CREDENCIALES}'.")
+    except gspread.SpreadsheetNotFound:
+        st.error(f"❌ Conexión exitosa, pero NO encuentro la hoja llamada '{NOMBRE_HOJA_DRIVE}'. Revisa el nombre en tu Drive.")
         st.stop()
     except Exception as e:
         st.error(f"❌ Error de Conexión: {e}")
