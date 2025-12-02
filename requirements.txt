@@ -2,4 +2,4 @@ streamlit
 pandas
 plotly
 gspread
-oauth2client
+google-auth
