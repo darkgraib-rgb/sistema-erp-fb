@@ -9,13 +9,12 @@ import plotly.graph_objects as go
 import os
 
 # --- 1. CONFIGURACIÓN ---
-st.set_page_config(page_title="ERP Maestro Nube", layout="wide", page_icon="☁️")
+st.set_page_config(page_title="ERP Maestro Nube", layout="wide", page_icon="🌽")
 
-# Configuración Google
 NOMBRE_HOJA_DRIVE = "DB_ERP_MASTER"
 ARCHIVO_CREDENCIALES = "credenciales.json"
 
-# --- 2. CONEXIÓN Y DATOS ---
+# --- 2. CONEXIÓN Y DATOS (BLINDADOS) ---
 @st.cache_resource
 def conectar_google_sheet():
     scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -24,7 +23,7 @@ def conectar_google_sheet():
             creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
         else:
             if not os.path.exists(ARCHIVO_CREDENCIALES):
-                st.error("❌ Falta archivo credenciales.json"); st.stop()
+                st.error("❌ Falta archivo credenciales."); st.stop()
             creds = Credentials.from_service_account_file(ARCHIVO_CREDENCIALES, scopes=scope)
         return gspread.authorize(creds).open(NOMBRE_HOJA_DRIVE)
     except Exception as e:
@@ -37,36 +36,46 @@ def load_data(pestana):
         data = ws.get_all_records()
         df = pd.DataFrame(data)
         
-        # --- LIMPIEZA DE DATOS (CRÍTICO PARA DASHBOARD) ---
-        if pestana == "ventas" and not df.empty:
-            # Convertir todo lo que parezca dinero a número flotante
-            for col in ['Total_Venta', 'Ganancia', 'Cantidad']:
-                if col in df.columns:
-                    # Quitamos '$' y ',' y convertimos a número
-                    df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce').fillna(0)
-            
-            # Rellenar vacíos
-            if 'Ubicacion' not in df.columns: df['Ubicacion'] = 'Local 1'
-            if 'Categoria' not in df.columns: df['Categoria'] = 'General'
+        # --- AUTO-REPARACIÓN DE ESTRUCTURA (SOLUCIÓN AL ERROR KEYERROR) ---
+        # Si la hoja está vacía o faltan columnas, las creamos en memoria
+        if pestana == "recetas":
+            cols_req = ["Producto", "Ingrediente", "Cantidad_Base", "Costo_Ref"]
+            for c in cols_req:
+                if c not in df.columns: df[c] = "" 
+            # Asegurar numéricos
+            for c in ['Cantidad_Base', 'Costo_Ref']:
+                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
-        if pestana == "menu" and not df.empty:
-             for c in ['Stock_Local1', 'Stock_Local2', 'Stock_Feria', 'Precio', 'Costo']:
-                if c in df.columns: 
-                    df[c] = pd.to_numeric(df[c].astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce').fillna(0)
+        if pestana == "ventas":
+            cols_req = ['Ticket_ID', 'Fecha', 'Hora', 'Ubicacion', 'Categoria', 'Producto', 'Cantidad', 'Total_Venta', 'Ganancia']
+            for c in cols_req:
+                if c not in df.columns:
+                    if c in ['Total_Venta', 'Ganancia', 'Cantidad']: df[c] = 0.0
+                    else: df[c] = ""
+            # Limpieza agresiva de números
+            for c in ['Total_Venta', 'Ganancia', 'Cantidad']:
+                df[c] = pd.to_numeric(df[c].astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce').fillna(0)
 
-        if pestana == "recetas" and not df.empty:
-             for c in ['Costo_Ref', 'Cantidad_Base']:
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c].astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce').fillna(0)
+        if pestana == "menu":
+            cols_req = ['Categoria', 'Producto', 'Precio', 'Costo', 'Stock_Local1', 'Stock_Local2', 'Stock_Feria']
+            for c in cols_req:
+                if c not in df.columns:
+                    if "Stock" in c or c in ['Precio', 'Costo']: df[c] = 0.0
+                    else: df[c] = ""
+            # Limpieza
+            for c in ['Stock_Local1', 'Stock_Local2', 'Stock_Feria', 'Precio', 'Costo']:
+                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
         return df
-    except: return pd.DataFrame()
+    except Exception as e:
+        # st.error(f"Debug Load: {e}") # Descomentar solo si es necesario depurar
+        return pd.DataFrame()
 
 def save_data(df, pestana):
     try:
         sh = conectar_google_sheet()
         ws = sh.worksheet(pestana)
-        df = df.astype(str) # Convertir a texto para evitar errores de JSON
+        df = df.astype(str)
         lista = [df.columns.values.tolist()] + df.values.tolist()
         ws.clear()
         ws.update(lista)
@@ -101,17 +110,14 @@ def cancelar_ticket(ticket_id):
     save_data(df_m, "menu")
     return True, "Ticket eliminado."
 
-# --- 3. DASHBOARD (Con Llaves Únicas para evitar errores) ---
+# --- 3. DASHBOARD COMPLETO (RESTAURADO) ---
 
 def render_dashboard_section(df_ventas, key_id):
-    """
-    key_id: Identificador único (ej. 'Gen', 'L1') para que las gráficas no choquen.
-    """
     if df_ventas.empty:
         st.info("Esperando ventas...")
         return
 
-    # KPIs
+    # 1. KPIs
     tot_v = df_ventas['Total_Venta'].sum()
     tot_g = df_ventas['Ganancia'].sum()
     tot_c = tot_v - tot_g
@@ -119,37 +125,53 @@ def render_dashboard_section(df_ventas, key_id):
     prom = tot_v / n_tk if n_tk > 0 else 0
     
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Ventas", f"${tot_v:,.0f}", border=True)
-    k2.metric("Ganancia", f"${tot_g:,.0f}", border=True)
-    k3.metric("Costo Insumo", f"${tot_c:,.0f}", border=True)
-    k4.metric("Ticket Promedio", f"${prom:,.0f}", help="Gasto por cliente", border=True)
+    k1.metric("Ventas", f"${tot_v:,.0f}")
+    k2.metric("Ganancia Neta", f"${tot_g:,.0f}")
+    k3.metric("Ticket Promedio", f"${prom:,.0f}")
+    k4.metric("Tickets", f"{n_tk}")
     
     st.divider()
     
+    # 2. Análisis Financiero y Tiempo
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("##### 💰 Inversión vs Ganancia")
-        # Gráfica Pastel Dinero
-        fig = go.Figure(data=[go.Pie(labels=['Costo (Recuperación)', 'Utilidad Neta'], 
+        st.markdown("##### 💰 Destino del Dinero")
+        fig = go.Figure(data=[go.Pie(labels=['Costo (Recuperación)', 'Utilidad (Ganancia)'], 
                                     values=[tot_c, tot_g], 
                                     hole=.4, 
                                     marker_colors=['#EF553B', '#00CC96'])])
-        st.plotly_chart(fig, use_container_width=True, key=f"pie_money_{key_id}")
+        st.plotly_chart(fig, use_container_width=True, key=f"pie_{key_id}")
     
     with c2:
-        st.markdown("##### 🕒 Horas Pico")
-        # Procesar hora
+        st.markdown("##### 🕒 Hora Pico")
         df_ventas['H'] = df_ventas['Hora'].astype(str).str.split(':').str[0]
         v_h = df_ventas.groupby('H')['Total_Venta'].sum().reset_index()
-        
-        fig2 = px.bar(v_h, x='H', y='Total_Venta', title="Venta por Hora", color='Total_Venta')
-        st.plotly_chart(fig2, use_container_width=True, key=f"bar_hour_{key_id}")
+        fig2 = px.bar(v_h, x='H', y='Total_Venta', title="Venta por Hora")
+        st.plotly_chart(fig2, use_container_width=True, key=f"bar_h_{key_id}")
 
-    # Tabla Matriz Rentabilidad
-    with st.expander(f"📊 Ver Detalle Productos ({key_id})"):
-        matriz = df_ventas.groupby('Producto').agg({'Cantidad':'sum', 'Total_Venta':'sum', 'Ganancia':'sum'}).reset_index()
-        matriz['Margen %'] = (matriz['Ganancia'] / matriz['Total_Venta'] * 100).fillna(0)
-        st.dataframe(matriz.sort_values('Ganancia', ascending=False), use_container_width=True)
+    # 3. Análisis de Producto (Doble Visión)
+    st.markdown("##### 🏆 Top Productos")
+    prod_stats = df_ventas.groupby('Producto').agg({'Cantidad':'sum', 'Total_Venta':'sum', 'Ganancia':'sum'}).reset_index()
+    
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        # Top Volumen
+        top_vol = prod_stats.nlargest(5, 'Cantidad')
+        fig3 = px.bar(top_vol, x='Cantidad', y='Producto', orientation='h', 
+                      title="Más Vendidos (Cantidad)", color='Cantidad')
+        st.plotly_chart(fig3, use_container_width=True, key=f"bar_v_{key_id}")
+        
+    with col_p2:
+        # Top Dinero (Ganancia)
+        top_gan = prod_stats.nlargest(5, 'Ganancia')
+        fig4 = px.bar(top_gan, x='Ganancia', y='Producto', orientation='h', 
+                      title="Más Rentables (Ganancia $)", color='Ganancia', color_continuous_scale='Greens')
+        st.plotly_chart(fig4, use_container_width=True, key=f"bar_g_{key_id}")
+
+    # 4. Matriz Detallada
+    with st.expander(f"📊 Ver Matriz de Rentabilidad ({key_id})"):
+        prod_stats['Margen %'] = (prod_stats['Ganancia'] / prod_stats['Total_Venta'] * 100).fillna(0)
+        st.dataframe(prod_stats.sort_values('Ganancia', ascending=False), use_container_width=True)
 
 # --- 4. VISTAS ---
 
@@ -162,7 +184,6 @@ def view_pos(df_menu):
 
     c_cat, c_tkt = st.columns([2, 1])
     with c_cat:
-        # EMOJIS AGREGADOS
         cats = ["🌽 Tamales", "🍔 Comida", "🥤 Bebidas", "🍬 Postres", "🍟 Snacks"]
         tabs = st.tabs(cats)
         for i, cat in enumerate(cats):
@@ -234,50 +255,48 @@ def view_pos(df_menu):
             df_h = load_data("ventas")
             if not df_h.empty:
                 df_h['Ticket_ID'] = df_h['Ticket_ID'].astype(str)
-                # MOSTRAR UBICACION EN HISTORIAL
                 res = df_h.groupby(['Ticket_ID', 'Ubicacion'])['Total_Venta'].sum().reset_index().sort_values('Ticket_ID', ascending=False).head(10)
                 st.dataframe(res, hide_index=True)
                 sel = st.selectbox("ID Ticket", res['Ticket_ID'])
-                if st.button("🚫 CANCELAR TICKET"):
-                    ok, msg = cancelar_ticket(sel)
-                    if ok: st.success(msg); time.sleep(1); st.rerun()
+                if st.button("🚫 CANCELAR"):
+                    with st.spinner("Cancelando..."):
+                        ok, msg = cancelar_ticket(sel)
+                        if ok: st.success(msg); time.sleep(1); st.rerun()
 
 def view_dashboard(df_menu):
-    st.markdown("### 📊 Dashboard")
+    st.markdown("### 📊 Dashboard Maestro")
     df_v = load_data("ventas")
     if df_v.empty: st.warning("Sin datos."); return
 
     t1, t2, t3, t4 = st.tabs(["🌎 GENERAL", "🏠 LOCAL 1", "🏪 LOCAL 2", "🎪 FERIA"])
-    
-    # Pasamos llaves únicas para que los gráficos no choquen
-    with t1: render_dashboard_section(df_v, "GEN")
+    with t1: render_dashboard_section(df_v, "G")
     with t2: render_dashboard_section(df_v[df_v['Ubicacion'] == 'Local 1'], "L1")
     with t3: render_dashboard_section(df_v[df_v['Ubicacion'] == 'Local 2'], "L2")
-    with t4: render_dashboard_section(df_v[df_v['Ubicacion'] == 'Feria'], "FER")
+    with t4: render_dashboard_section(df_v[df_v['Ubicacion'] == 'Feria'], "F")
 
 def view_inventory(df_menu):
-    st.markdown("### 📦 Inventario")
+    st.markdown("### 📦 Inventario Nube")
     t1, t2 = st.tabs(["📝 Stock", "🚚 Transferir"])
     
     with t1:
-        # Precios sugeridos
         df_menu['Ganancia'] = df_menu['Precio'] - df_menu['Costo']
-        df_menu['Sug_33'] = df_menu['Costo'] * 1.5
-        df_menu['Sug_66'] = df_menu['Costo'] * 3.0
+        df_menu['S_33'] = df_menu['Costo'] * 1.5
+        df_menu['S_66'] = df_menu['Costo'] * 3.0
         
         cfg = {
             "Categoria": st.column_config.SelectboxColumn(options=["🌽 Tamales", "🍔 Comida", "🥤 Bebidas", "🍬 Postres", "🍟 Snacks"], required=True),
             "Precio": st.column_config.NumberColumn(format="$%.2f"),
             "Costo": st.column_config.NumberColumn(format="$%.2f"),
             "Ganancia": st.column_config.NumberColumn(format="$%.2f", disabled=True),
-            "Sug_33": st.column_config.NumberColumn("Sug 33%", format="$%.2f", disabled=True),
-            "Sug_66": st.column_config.NumberColumn("Sug 66%", format="$%.2f", disabled=True),
+            "S_33": st.column_config.NumberColumn("Sug 33%", format="$%.2f", disabled=True),
+            "S_66": st.column_config.NumberColumn("Sug 66%", format="$%.2f", disabled=True),
         }
         df_ed = st.data_editor(df_menu, num_rows="dynamic", use_container_width=True, column_config=cfg)
-        if st.button("💾 Sincronizar"):
-            cols = ['Categoria', 'Producto', 'Precio', 'Costo', 'Stock_Local1', 'Stock_Local2', 'Stock_Feria']
-            save_data(df_ed[cols], "menu")
-            st.success("Hecho."); time.sleep(1); st.rerun()
+        
+        if st.button("💾 Guardar"):
+            cols_ok = ['Categoria', 'Producto', 'Precio', 'Costo', 'Stock_Local1', 'Stock_Local2', 'Stock_Feria']
+            save_data(df_ed[cols_ok], "menu")
+            st.success("Guardado."); time.sleep(1); st.rerun()
 
     with t2:
         c1, c2, c3, c4 = st.columns(4)
@@ -293,31 +312,34 @@ def view_inventory(df_menu):
                 df_menu.at[idx, c_o] -= cant
                 df_menu.at[idx, c_d] += cant
                 save_data(df_menu, "menu")
-                st.success("Listo.")
-            else: st.error("Stock insuficiente.")
+                st.success("Transferido.")
+            else: st.error("Stock bajo.")
 
 def view_recipes(df_menu):
     st.markdown("### 🧪 Recetas (Restaurada)")
     df_rec = load_data("recetas")
     
-    t_calc, t_edit = st.tabs(["🧮 Calculadora de Costos", "📝 Base de Datos"])
+    t_calc, t_edit = st.tabs(["🧮 Calculadora", "📝 Editar BD"])
     
     with t_calc:
-        st.info("Calcula costos por lotes (ej. una olla) o por unidad.")
         c1, c2 = st.columns(2)
         with c1:
             prod = st.selectbox("Producto:", df_menu['Producto'].unique(), key="s_p")
             
-            # --- MEMORIA DE RECETA ---
+            # Auto-carga con lógica anti-error
             if 'last_pr' not in st.session_state or st.session_state.last_pr != prod:
                 st.session_state.lista_insumos = []
                 if not df_rec.empty:
+                    # Filtramos asegurando que la columna Producto exista (ya lo garantizamos en load_data)
                     filtro = df_rec[df_rec['Producto'] == prod]
                     for _, r in filtro.iterrows():
-                        st.session_state.lista_insumos.append({"Ingrediente": r['Ingrediente'], "Costo": float(r['Costo_Ref']), "Cantidad": float(r['Cantidad_Base'])})
+                        st.session_state.lista_insumos.append({
+                            "Ingrediente": r['Ingrediente'], 
+                            "Costo": float(r['Costo_Ref']), 
+                            "Cantidad": float(r['Cantidad_Base'])
+                        })
                 st.session_state.last_pr = prod
 
-            # --- SELECTOR MODO RESTAURADO ---
             modo = st.radio("Modo:", ["📦 Lote (Olla/Paquete)", "🍔 Unidad (Individual)"], horizontal=True)
 
             with st.form("a_ing"):
@@ -340,7 +362,6 @@ def view_recipes(df_menu):
             st.markdown(f"#### 📝 {prod}")
             if st.session_state.lista_insumos:
                 df_i = pd.DataFrame(st.session_state.lista_insumos)
-                # Mostrar botón eliminar
                 for i, row in df_i.iterrows():
                     col_del1, col_del2 = st.columns([4, 1])
                     col_del1.text(f"{row['Ingrediente']}: ${row['Costo']:.2f}")
@@ -351,7 +372,6 @@ def view_recipes(df_menu):
                 suma = df_i['Costo'].sum()
                 st.markdown(f"**Costo Insumos Total:** ${suma:.2f}")
                 
-                # --- RENDIMIENTO RESTAURADO ---
                 rendimiento = 1
                 if "Lote" in modo:
                     rendimiento = st.number_input("¿Cuántas piezas salieron de esta olla/lote?", min_value=1, value=50)
@@ -360,14 +380,18 @@ def view_recipes(df_menu):
                 st.success(f"💰 Costo Unitario Final: ${costo_final:.2f}")
                 
                 if st.button("💾 Guardar y Actualizar Precio"):
-                    # Update Menú
                     idx = df_menu.index[df_menu['Producto'] == prod]
-                    df_menu.at[idx[0], 'Costo'] = costo_final
-                    save_data(df_menu, "menu")
+                    if not idx.empty:
+                        df_menu.at[idx[0], 'Costo'] = costo_final
+                        save_data(df_menu, "menu")
                     
-                    # Update Recetas
+                    # Guardar Receta
                     df_rec_full = load_data("recetas")
-                    df_rec_clean = df_rec_full[df_rec_full['Producto'] != prod]
+                    if not df_rec_full.empty:
+                        df_rec_clean = df_rec_full[df_rec_full['Producto'] != prod]
+                    else:
+                        df_rec_clean = pd.DataFrame(columns=["Producto", "Ingrediente", "Cantidad_Base", "Costo_Ref"])
+
                     nuevas = [{"Producto": prod, "Ingrediente": i['Ingrediente'], "Cantidad_Base": i['Cantidad'], "Costo_Ref": i['Costo']} for i in st.session_state.lista_insumos]
                     df_final = pd.concat([df_rec_clean, pd.DataFrame(nuevas)])
                     save_data(df_final, "recetas")
@@ -394,7 +418,7 @@ def main():
     df_menu = load_data("menu")
     if df_menu.empty:
         st.warning("Cargando DB...")
-        if st.button("Inicializar"):
+        if st.button("Inicializar DB"):
             data = [{"Categoria": "🌽 Tamales", "Producto": "Tamal Verde", "Precio": 20, "Costo": 8.5, "Stock_Local1": 50, "Stock_Local2": 30, "Stock_Feria": 0}]
             save_data(pd.DataFrame(data), "menu")
             st.rerun()
